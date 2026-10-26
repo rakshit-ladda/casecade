@@ -51,6 +51,29 @@ public class DecisionEngineTest {
         assertEquals(DecisionEngine.Action.ALLOW, engine.evaluateForAppRole(in, DecisionEngine.AppRole.BLOCK_IN_FOCUS).action);
     }
 
+    @Test public void focusOnAllowRoleLeavesNotificationAvailable() {
+        DecisionEngine.Input in = new DecisionEngine.Input(); in.focusActive = true;
+        assertEquals(DecisionEngine.Action.ALLOW, engine.evaluateForAppRole(in, DecisionEngine.AppRole.ALLOW).action);
+    }
+
+    @Test public void focusOnBlockRoleAlwaysHoldsRegardlessOfImportanceAndHistory() {
+        DecisionEngine.Input in = new DecisionEngine.Input(); in.focusActive = true;
+        in.role = DecisionEngine.Role.IMPORTANT;
+        in.stats = new DecisionEngine.Stats(200, 200, 200, 0);
+        assertEquals(DecisionEngine.Action.DEFER, engine.evaluateForAppRole(in, DecisionEngine.AppRole.BLOCK_IN_FOCUS).action);
+    }
+
+    @Test public void engineFailureFallsOpen() {
+        DecisionEngine.Result result = engine.evaluateForAppRoleSafely(null, DecisionEngine.AppRole.BLOCK_IN_FOCUS);
+        assertEquals(DecisionEngine.Action.ALLOW, result.action);
+        assertTrue(result.reason.startsWith("Fail-open"));
+    }
+
+    @Test public void dndRestoresOnlyWhenAttentionTwinOwnsIt() {
+        assertTrue(DndController.shouldRestore(true));
+        assertFalse(DndController.shouldRestore(false));
+    }
+
     @Test public void otpCallAndAlarmAreAlwaysAllowed() {
         DecisionEngine.Input otp = new DecisionEngine.Input(); otp.focusActive = true; otp.text = "verification code 483920";
         assertEquals(DecisionEngine.Action.ALLOW, engine.evaluateForAppRole(otp, DecisionEngine.AppRole.BLOCK_IN_FOCUS).action);

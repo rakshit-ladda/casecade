@@ -13,9 +13,12 @@ public final class BreakReceiver extends BroadcastReceiver {
     private static final String CHANNEL = "attentiontwin_breaks";
     @Override public void onReceive(Context context, Intent intent) {
         String action = intent == null ? "" : intent.getAction();
-        int held = 0;
-        try (Store store = new Store(context)) { held = store.heldEvents(false).length(); }
-        if ("com.attentiontwin.BREAK".equals(action) && held > 0) postDigest(context, held);
+        long now = System.currentTimeMillis();
+        FocusUtils.clearExpiredManualPause(context);
+        FocusUtils.releaseExpiredSnoozeMarkers(context, now);
+        int due = 0;
+        try (Store store = new Store(context)) { due = store.countDueHeld(now); store.releaseExpired(now); }
+        if ("com.attentiontwin.BREAK".equals(action) && due > 0) postDigest(context, due);
         DndController.reconcile(context);
         FocusScheduler.scheduleNext(context);
     }

@@ -22,12 +22,54 @@ final class FocusUtils {
     }
 
     static boolean isFocusActive(Context context) {
+        SharedPreferences p = prefs(context);
+        if (p.getBoolean("paused", false)) return false;
+        long pausedUntil = p.getLong("focus_paused_until", 0L);
+        if (pausedUntil == Long.MAX_VALUE || pausedUntil > System.currentTimeMillis()) return false;
         long until = prefs(context).getLong("focus_until", 0L);
         return until == Long.MAX_VALUE || until > System.currentTimeMillis() || inDailyWindow(context);
     }
 
     static long focusUntil(Context context) {
         return prefs(context).getLong("focus_until", 0L);
+    }
+
+    static long nextFocusWindowStartAt(Context context) {
+        String schedule = prefs(context).getString("focus_schedule", "");
+        long now = System.currentTimeMillis(), next = Long.MAX_VALUE;
+        Calendar today = Calendar.getInstance();
+        for (String item : schedule.split(",")) {
+            String[] parts = item.trim().split("-");
+            if (parts.length != 2) continue;
+            int start = parseTime(parts[0]);
+            if (start < 0) continue;
+            for (int day=0; day<=1; day++) {
+                Calendar candidate = (Calendar) today.clone(); candidate.add(Calendar.DAY_OF_YEAR, day);
+                candidate.set(Calendar.HOUR_OF_DAY, start/60); candidate.set(Calendar.MINUTE, start%60); candidate.set(Calendar.SECOND, 0); candidate.set(Calendar.MILLISECOND, 0);
+                if (candidate.getTimeInMillis() > now) next = Math.min(next, candidate.getTimeInMillis());
+            }
+        }
+        return next;
+    }
+
+    static void clearExpiredManualPause(Context context) {
+        long until = prefs(context).getLong("focus_paused_until", 0L);
+        if (until > 0L && until != Long.MAX_VALUE && until <= System.currentTimeMillis()) prefs(context).edit().remove("focus_paused_until").apply();
+    }
+
+    static void releaseExpiredSnoozeMarkers(Context context, long now) {
+        SharedPreferences prefs = prefs(context);
+        SharedPreferences.Editor editor = prefs.edit();
+        for (java.util.Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            String key = entry.getKey();
+            if (!key.startsWith("snooze_release_")) continue;
+            long releaseAt = entry.getValue() instanceof Number ? ((Number) entry.getValue()).longValue() : 0L;
+            if (releaseAt > 0L && releaseAt <= now) {
+                String hash = key.substring("snooze_release_".length());
+                editor.putBoolean("snooze_release_once_" + hash, true).remove(key);
+            }
+        }
+        editor.apply();
     }
 
     static boolean inDailyWindow(Context context) {
@@ -89,15 +131,13 @@ final class FocusUtils {
 
     static String roleFor(Context context, String packageName) {
         String stored = prefs(context).getString("role_" + packageName, null);
-        if ("IMPORTANT".equals(stored)) return DecisionEngine.AppRole.ALLOW.name();
+        if ("IMPORTANT".equals(stored)) return DecisionEngine.AppRole.IMPORTANT.name();
         if ("DISTRACTING".equals(stored)) return DecisionEngine.AppRole.BLOCK_IN_FOCUS.name();
         if ("NORMAL".equals(stored)) {
-            if ("com.instagram.android".equals(packageName) || "com.whatsapp".equals(packageName) || "com.google.android.gm".equals(packageName)) return DecisionEngine.AppRole.BLOCK_IN_FOCUS.name();
-            return DecisionEngine.AppRole.SMART.name();
+            return DecisionEngine.AppRole.ALLOW.name();
         }
         if (stored != null) return stored;
-        if ("com.instagram.android".equals(packageName) || "com.whatsapp".equals(packageName) || "com.google.android.gm".equals(packageName)) return DecisionEngine.AppRole.BLOCK_IN_FOCUS.name();
-        return DecisionEngine.AppRole.SMART.name();
+        return DecisionEngine.AppRole.ALLOW.name();
     }
 
     static String categoryFor(String packageName, String label) {

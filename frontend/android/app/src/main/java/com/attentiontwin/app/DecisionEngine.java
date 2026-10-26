@@ -7,7 +7,7 @@ import java.util.regex.Pattern;
 public final class DecisionEngine {
     public enum Action { ALLOW, DEFER, SUPPRESS }
     public enum Role { IMPORTANT, NORMAL, DISTRACTING }
-    public enum AppRole { BLOCK_IN_FOCUS, ALLOW, SMART }
+    public enum AppRole { BLOCK_IN_FOCUS, ALLOW, SMART, IMPORTANT }
 
     private static final Pattern OTP = Pattern.compile(
         "\\b(otp|one[- ]time (password|code)|verification code|security code|passcode)\\b|\\b(code|otp|passcode|verification)\\D{0,20}\\d{4,8}\\b",
@@ -120,6 +120,15 @@ public final class DecisionEngine {
     /** Deterministic routing for live app notifications; estimates are consulted only for SMART. */
     public Result evaluateForAppRole(Input input, AppRole appRole) {
         if (input == null) throw new IllegalArgumentException("input is required");
+        AppRole role = appRole == null ? AppRole.ALLOW : appRole;
+        if (!input.focusActive) return result(Action.ALLOW, "Focus is off; leave the notification available.", 0.0, 0.0, 0.0, 0.0, 0.0, 0, false);
+        String exception = hardExceptionReason(input);
+        if (!exception.isEmpty()) return result(Action.ALLOW, exception, 0.0, 0.0, 0.0, 0.0, 0.0, 0, true);
+        if (role == AppRole.ALLOW || role == AppRole.IMPORTANT) {
+            return result(Action.ALLOW, role == AppRole.IMPORTANT ? "This app is marked Important/VIP." : "This app is set to Allow during focus.", 0.0, 0.0, 0.0, 0.0, 0.0, 0, role == AppRole.IMPORTANT);
+        }
+        if (role == AppRole.BLOCK_IN_FOCUS) return result(Action.DEFER, "This app is set to Block in focus.", 0.0, 0.0, 0.0, 0.0, 0.0, 0, false);
+
         Input safeInput = new Input();
         safeInput.packageName = input.packageName; safeInput.category = input.category;
         safeInput.notificationCategory = input.notificationCategory; safeInput.title = input.title;
@@ -128,12 +137,16 @@ public final class DecisionEngine {
         safeInput.keepPreviews = input.keepPreviews; safeInput.minutesToBreak = input.minutesToBreak;
         safeInput.stats = input.stats;
         Result estimated = evaluate(safeInput);
-        if (!input.focusActive || estimated.exception) return estimated;
-        AppRole role = appRole == null ? AppRole.SMART : appRole;
-        if (role == AppRole.ALLOW) return result(Action.ALLOW, "This app is set to Allow during focus.", estimated.openRateEstimate, estimated.importanceEstimate, estimated.allowCost, estimated.deferCost, estimated.suppressCost, estimated.observations, false);
-        if (role == AppRole.BLOCK_IN_FOCUS) return result(Action.DEFER, "This app is set to Block in focus.", estimated.openRateEstimate, estimated.importanceEstimate, estimated.allowCost, estimated.deferCost, estimated.suppressCost, estimated.observations, false);
         Action smartAction = estimated.action == Action.ALLOW ? Action.ALLOW : Action.DEFER;
         return result(smartAction, "SMART used the local estimate to choose " + smartAction.name() + ".", estimated.openRateEstimate, estimated.importanceEstimate, estimated.allowCost, estimated.deferCost, estimated.suppressCost, estimated.observations, false);
+    }
+
+    /** Fail-open wrapper for live routing when input/state is corrupt or the engine throws. */
+    public Result evaluateForAppRoleSafely(Input input, AppRole role) {
+        try { return evaluateForAppRole(input, role); }
+        catch (RuntimeException error) {
+            return result(Action.ALLOW, "Fail-open: decision engine unavailable; notification left available.", 0.0, 0.0, 0.0, 0.0, 0.0, 0, true);
+        }
     }
 
     public static String hardExceptionReason(Input input) {

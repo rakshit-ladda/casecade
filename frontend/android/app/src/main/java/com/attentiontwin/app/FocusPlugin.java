@@ -38,6 +38,8 @@ public final class FocusPlugin extends Plugin {
     private final DecisionEngine engine = new DecisionEngine();
 
     @PluginMethod public void getState(PluginCall call) {
+        FocusUtils.clearExpiredManualPause(getContext());
+        FocusUtils.releaseExpiredSnoozeMarkers(getContext(), System.currentTimeMillis());
         FocusListenerService.recheckAndRebind(getContext());
         DndController.reconcile(getContext());
         JSObject result = new JSObject();
@@ -47,6 +49,7 @@ public final class FocusPlugin extends Plugin {
         result.put("listenerConnectedAt", FocusListenerService.connectedAt);
         result.put("lastCallbackAt", FocusUtils.prefs(getContext()).getLong("last_callback_at", 0L));
         result.put("focusActive", FocusUtils.isFocusActive(getContext()));
+        result.put("paused", FocusUtils.prefs(getContext()).getBoolean("paused", false));
         result.put("focusUntil", until == Long.MAX_VALUE ? -1L : until);
         long nextBreak = FocusUtils.nextBreakAt(getContext());
         result.put("nextBreakAt", nextBreak == Long.MAX_VALUE ? 0L : nextBreak);
@@ -59,7 +62,7 @@ public final class FocusPlugin extends Plugin {
         boolean dndActive = dndAccess && notifications != null && notifications.getCurrentInterruptionFilter() == NotificationManager.INTERRUPTION_FILTER_PRIORITY;
         result.put("dndSilencing", FocusUtils.prefs(getContext()).getBoolean("silence_alerts", false) && dndActive && FocusUtils.isFocusActive(getContext()));
         result.put("autostartState", "Android does not expose this device-specific permission; check Autostart settings.");
-        try (Store store = new Store(getContext())) { result.put("today", store.summaryToday()); result.put("seenLast10m", store.countSince(System.currentTimeMillis() - 10L * 60L * 1000L, null)); }
+        try (Store store = new Store(getContext())) { store.releaseExpired(System.currentTimeMillis()); result.put("today", store.summaryToday()); result.put("seenLast10m", store.countSince(System.currentTimeMillis() - 10L * 60L * 1000L, null)); }
         call.resolve(result);
     }
 
@@ -69,13 +72,31 @@ public final class FocusPlugin extends Plugin {
         if (minutes == -1) until = Long.MAX_VALUE;
         else if (minutes <= 0) until = 0L;
         else until = System.currentTimeMillis() + Math.min(minutes, 12 * 60) * 60000L;
-        FocusUtils.prefs(getContext()).edit().putLong("focus_until", until).apply();
+        android.content.SharedPreferences.Editor editor = FocusUtils.prefs(getContext()).edit().putLong("focus_until", until);
+        if (minutes <= 0) {
+            long resumeAt = FocusUtils.nextFocusWindowStartAt(getContext());
+            editor.putLong("focus_paused_until", resumeAt == Long.MAX_VALUE ? Long.MAX_VALUE : resumeAt);
+        } else editor.remove("focus_paused_until");
+        editor.apply();
         FocusScheduler.scheduleFocusEnd(getContext());
         DndController.reconcile(getContext());
         JSObject result = new JSObject();
         result.put("focusActive", FocusUtils.isFocusActive(getContext()));
         result.put("focusUntil", until == Long.MAX_VALUE ? -1L : until);
         call.resolve(result);
+    }
+
+    @PluginMethod public void setPaused(PluginCall call) {
+        boolean paused = call.getBoolean("paused", true);
+        FocusUtils.prefs(getContext()).edit().putBoolean("paused", paused).apply();
+        DndController.reconcile(getContext());
+        FocusScheduler.scheduleNext(getContext());
+        call.resolve(new JSObject().put("paused", paused).put("focusActive", FocusUtils.isFocusActive(getContext())));
+    }
+
+    @PluginMethod public void restoreDndNow(PluginCall call) {
+        DndController.restoreNow(getContext());
+        call.resolve(new JSObject().put("restored", true));
     }
 
     @PluginMethod public void setSettings(PluginCall call) {
@@ -88,14 +109,19 @@ public final class FocusPlugin extends Plugin {
         if (!validTimes(breaks, 12, false)) { call.reject("Use up to 12 break times such as 10:30,13:00,15:30"); return; }
         if (!validWindows(focusSchedule, 8)) { call.reject("Use focus windows such as 09:00-12:00,13:00-17:00"); return; }
         if (urgentWords.length() > 500 || vipContacts.length() > 500) { call.reject("Urgent words and VIP contacts are limited to 500 characters"); return; }
-        FocusUtils.prefs(getContext()).edit()
+        android.content.SharedPreferences prefs = FocusUtils.prefs(getContext());
+        android.content.SharedPreferences.Editor editor = prefs.edit()
             .putString("break_times", breaks)
             .putString("focus_schedule", focusSchedule)
             .putString("urgent_words", urgentWords)
             .putString("vip_contacts", vipContacts)
             .putBoolean("keep_previews", keepPreviews)
-            .putBoolean("silence_alerts", silenceAlerts)
-            .apply();
+            .putBoolean("silence_alerts", silenceAlerts);
+        long pauseUntil = prefs.getLong("focus_paused_until", 0L);
+        if (pauseUntil == Long.MAX_VALUE && prefs.getLong("focus_until", 0L) == 0L) {
+            editor.putLong("focus_paused_until", FocusUtils.nextFocusWindowStartAt(getContext()));
+        }
+        editor.apply();
         FocusScheduler.scheduleNext(getContext());
         DndController.reconcile(getContext());
         call.resolve(settingsObject());
@@ -130,7 +156,7 @@ public final class FocusPlugin extends Plugin {
         String pkg = call.getString("packageName", "").trim();
         String role = call.getString("role", "SMART").trim().toUpperCase(Locale.ROOT);
         try { DecisionEngine.AppRole.valueOf(role); }
-        catch (IllegalArgumentException error) { call.reject("Role must be BLOCK_IN_FOCUS, ALLOW, or SMART"); return; }
+        catch (IllegalArgumentException error) { call.reject("Choose Block in focus, Allow, Smart, or Important"); return; }
         if (pkg.isEmpty() || pkg.equals(getContext().getPackageName())) { call.reject("Choose an installed app"); return; }
         FocusUtils.prefs(getContext()).edit().putString("role_" + pkg, role).apply();
         call.resolve(new JSObject().put("packageName", pkg).put("role", role));
@@ -173,10 +199,25 @@ public final class FocusPlugin extends Plugin {
                 store.updateState(item.optLong("id"), "RESTORED", 0L, "ALLOW", "User restored this saved preview.");
                 restored++;
             }
-            held = store.heldEvents(false).length();
+            JSONArray waiting = store.heldEvents(false);
+            held = waiting.length();
+            android.content.SharedPreferences.Editor prefs = FocusUtils.prefs(getContext()).edit();
+            for (int i = 0; i < waiting.length(); i++) {
+                JSONObject item = waiting.optJSONObject(i);
+                if (item == null) continue;
+                String hash = item.optString("nkey", "");
+                if (!hash.isEmpty()) {
+                    prefs.putBoolean("snooze_release_once_" + hash, true).remove("snooze_release_" + hash);
+                }
+                store.updateState(item.optLong("id"), "RELEASED", 0L, "ALLOW",
+                    "You asked to release everything. Android will allow the original alert if it is re-posted; snoozes cannot be pulled forward early.");
+            }
+            prefs.apply();
+            if (held > 0) postHeldDigest(held);
         }
+        DndController.restoreNow(getContext());
         call.resolve(new JSObject().put("restored", restored).put("held", held)
-            .put("message", held > 0 ? "Android controls held-notification timing; snoozes cannot be cancelled early." : "Suppressed previews restored."));
+            .put("message", held > 0 ? held + " held alerts were added to your release digest. Android may still show the original alert at its scheduled break." : "Saved alerts are available again."));
     }
 
     @PluginMethod public void evaluate(PluginCall call) {
@@ -383,6 +424,17 @@ public final class FocusPlugin extends Plugin {
         Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(getContext(), RESTORE_CHANNEL) : new Notification.Builder(getContext());
         builder.setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Restored from " + label).setContentText(preview).setAutoCancel(true);
         try { manager.notify((int) (id & 0x7fffffff), builder.build()); } catch (SecurityException ignored) { }
+    }
+
+    private void postHeldDigest(int count) {
+        NotificationManager manager = (NotificationManager) getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        ensureChannel(manager, RESTORE_CHANNEL, "AttentionTwin updates", NotificationManager.IMPORTANCE_DEFAULT);
+        Notification.Builder builder = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(getContext(), RESTORE_CHANNEL) : new Notification.Builder(getContext());
+        builder.setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Your focus update")
+            .setContentText(count + " notifications were held. Open their apps to catch up; Android controls when snoozed alerts return.")
+            .setAutoCancel(true);
+        try { manager.notify(9205, builder.build()); } catch (SecurityException ignored) { }
     }
 
     private static void ensureChannel(NotificationManager manager, String id, String name, int importance) {

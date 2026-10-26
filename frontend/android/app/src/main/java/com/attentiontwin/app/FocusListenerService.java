@@ -55,6 +55,16 @@ public final class FocusListenerService extends NotificationListenerService {
     }
 
     @Override public void onNotificationPosted(StatusBarNotification sbn) {
+        try {
+            processNotification(sbn);
+        } catch (Throwable error) {
+            // Notification interception must fail open. In particular, never cancel or snooze
+            // from the recovery path when a DB, parser, or engine unexpectedly fails.
+            Log.e("AttentionTwin", "notification processing failed open", error);
+        }
+    }
+
+    private void processNotification(StatusBarNotification sbn) {
         if (sbn == null) return;
         Notification notification = sbn.getNotification();
         String rawPackage = sbn.getPackageName();
@@ -78,22 +88,17 @@ public final class FocusListenerService extends NotificationListenerService {
         String roleText = FocusUtils.roleFor(this, packageName);
         DecisionEngine.AppRole role;
         try { role = DecisionEngine.AppRole.valueOf(roleText); }
-        catch (IllegalArgumentException ignored) { role = DecisionEngine.AppRole.SMART; }
+        catch (RuntimeException ignored) { role = DecisionEngine.AppRole.ALLOW; }
 
         boolean focus = FocusUtils.isFocusActive(this);
-        long scheduledRelease = FocusUtils.prefs(this).getLong("snooze_release_" + keyHash, 0L);
-        if (scheduledRelease > 0L) {
-            if (DecisionEngine.shouldAllowSnoozeReleaseOnce(scheduledRelease, now)) {
-                FocusUtils.prefs(this).edit().remove("snooze_release_" + keyHash).apply();
-                org.json.JSONObject released = store.findByKey(keyHash);
-                if (released != null) store.updateState(released.optLong("id"), "RELEASED", 0L, "ALLOW", "The snoozed notification returned at its scheduled release and was allowed once.");
-                recordCallback(now, rawPackage, "decision=ALLOW reason=snooze release; allow once");
-                return;
-            }
-            boolean snoozedAgain = false;
-            try { snoozeNotification(sbn.getKey(), scheduledRelease - now); snoozedAgain = true; }
-            catch (RuntimeException error) { try { cancelNotification(sbn.getKey()); } catch (RuntimeException ignored) { } }
-            recordCallback(now, rawPackage, "action=" + (snoozedAgain ? "SNOOZE" : "CANCEL") + " result=retained early re-post");
+        // Allow is the default. Evaluate current focus and role before looking at a saved
+        // snooze marker: stale snoozes must never hide a notification after focus ends.
+        if (!focus || role == DecisionEngine.AppRole.ALLOW || role == DecisionEngine.AppRole.IMPORTANT) {
+            FocusUtils.prefs(this).edit().remove("snooze_release_" + keyHash)
+                .remove("snooze_release_once_" + keyHash).apply();
+            recordCallback(now, rawPackage, "decision=ALLOW role=" + roleText + " reason=" +
+                (!focus ? "Focus is off; notification left alone." : role == DecisionEngine.AppRole.IMPORTANT
+                    ? "App is marked Important; notification left alone." : "App is set to Allow; notification left alone."));
             return;
         }
 
@@ -113,6 +118,36 @@ public final class FocusListenerService extends NotificationListenerService {
         boolean vip = FocusUtils.isVip(this, title, body);
         String exceptionReason = DecisionEngine.hardExceptionReason(input);
         if (vip) exceptionReason = "Exception: VIP contact is on your allow list.";
+        if (!exceptionReason.isEmpty()) {
+            recordCallback(now, rawPackage, "decision=ALLOW role=" + roleText + " reason=" + exceptionReason);
+            return;
+        }
+
+        if (role == DecisionEngine.AppRole.BLOCK_IN_FOCUS &&
+            FocusUtils.prefs(this).getBoolean("snooze_release_once_" + keyHash, false)) {
+            FocusUtils.prefs(this).edit().remove("snooze_release_once_" + keyHash).remove("snooze_release_" + keyHash).apply();
+            org.json.JSONObject released = store.findByKey(keyHash);
+            if (released != null) store.updateState(released.optLong("id"), "RELEASED", 0L, "ALLOW", "Released by your request; this repost was allowed once.");
+            recordCallback(now, rawPackage, "decision=ALLOW role=BLOCK_IN_FOCUS reason=release request; allow this repost once");
+            return;
+        }
+
+        long scheduledRelease = FocusUtils.prefs(this).getLong("snooze_release_" + keyHash, 0L);
+        if (role == DecisionEngine.AppRole.BLOCK_IN_FOCUS && scheduledRelease > 0L) {
+            if (DecisionEngine.shouldAllowSnoozeReleaseOnce(scheduledRelease, now)) {
+                FocusUtils.prefs(this).edit().remove("snooze_release_" + keyHash).apply();
+                org.json.JSONObject released = store.findByKey(keyHash);
+                if (released != null) store.updateState(released.optLong("id"), "RELEASED", 0L, "ALLOW", "The snoozed notification returned at its scheduled release and was allowed once.");
+                recordCallback(now, rawPackage, "decision=ALLOW reason=snooze release; allow once");
+                return;
+            }
+            boolean snoozedAgain = false;
+            try { snoozeNotification(sbn.getKey(), scheduledRelease - now); snoozedAgain = true; }
+            catch (RuntimeException error) { try { cancelNotification(sbn.getKey()); } catch (RuntimeException ignored) { } }
+            recordCallback(now, rawPackage, "action=" + (snoozedAgain ? "SNOOZE" : "CANCEL") + " result=retained early re-post");
+            return;
+        }
+
         DecisionEngine.Result result;
         long releaseAt = 0L;
 
@@ -125,8 +160,9 @@ public final class FocusListenerService extends NotificationListenerService {
                 try { cancelNotification(sbn.getKey()); }
                 catch (RuntimeException cancelError) { }
             }
-            input.stats = store.stats(packageName, isTest ? "test" : "real");
-            result = engine.evaluateForAppRole(input, role);
+            // A BLOCK role is deterministic; learned estimates cannot change this action.
+            result = new DecisionEngine.Result(DecisionEngine.Action.DEFER,
+                "This app is set to Block in focus.", 0.0, 0.0, 0.0, 0.0, 0.0, 0, false);
             org.json.JSONObject existing = store.findByKey(keyHash);
             String decisionReason = "This app is set to Block in focus.";
             if (!snoozed) decisionReason += " Android snooze failed; notification was cancelled as fallback.";
@@ -145,7 +181,7 @@ public final class FocusListenerService extends NotificationListenerService {
             return;
         }
         input.stats = store.stats(packageName, isTest ? "test" : "real");
-        result = engine.evaluateForAppRole(input, role);
+        result = engine.evaluateForAppRoleSafely(input, role);
         if (!exceptionReason.isEmpty()) result = new DecisionEngine.Result(DecisionEngine.Action.ALLOW, exceptionReason, result.openRateEstimate, result.importanceEstimate, result.allowCost, result.deferCost, result.suppressCost, result.observations, true);
         DecisionEngine.Action action = result.action;
         String reason = result.reason;

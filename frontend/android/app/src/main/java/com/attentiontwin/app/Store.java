@@ -112,6 +112,19 @@ public final class Store extends SQLiteOpenHelper {
         return listEvents("HELD", 300, includeDemo);
     }
 
+    public synchronized int countDueHeld(long now) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM events WHERE state='HELD' AND source!='demo' AND releaseAt>0 AND releaseAt<=?", new String[]{String.valueOf(now)})) {
+            return c.moveToFirst() ? c.getInt(0) : 0;
+        }
+    }
+
+    public synchronized int releaseExpired(long now) {
+        ContentValues values = new ContentValues();
+        values.put("state", "RELEASED"); values.put("action", "ALLOW"); values.put("releaseAt", 0L);
+        values.put("reason", "Break time passed; the notification is allowed when Android re-posts it.");
+        return getWritableDatabase().update(EVENTS, values, "state='HELD' AND releaseAt>0 AND releaseAt<=?", new String[]{String.valueOf(now)});
+    }
+
     public synchronized int countSince(long since, String source) {
         String selection = "ts>=?" + (source == null ? " AND source!='demo'" : " AND source=?");
         String[] args = source == null ? new String[]{String.valueOf(since)} : new String[]{String.valueOf(since), source};
