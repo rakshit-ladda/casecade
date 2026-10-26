@@ -1,0 +1,25 @@
+flowchart TD
+    Android[Android NotificationManager] -->|posts notification| Listener[FocusListenerService]
+    Listener --> Gate{Focus active?}
+    Gate -->|no| Allow[Allow notification]
+    Gate -->|yes| Classify[Package role and safety exceptions]
+    Classify -->|call, alarm, OTP, urgent, VIP| Allow
+    Classify -->|role Allow| Allow
+    Classify -->|role Block in focus| Hold[Snooze notification until scheduled release]
+    Classify -->|role Smart| Estimate[Local estimate and decision rules]
+    Estimate -->|allow| Allow
+    Estimate -->|defer| Hold
+    Estimate -. comparison only .-> Lab[Counterfactual Lab]
+    Hold --> Store[Local event store and Inbox]
+    Allow --> Store
+    Focus[Focus timer, app roles, pause, release] --> Listener
+    Focus --> DND[Optional Android DND policy]
+    DND -. saves and restores prior filter .-> Android
+    UI[AttentionTwin screens and diagnostics] <--> Store
+    Lab --> Offline[Offline qualitative comparison]
+    Lab -. optional configured request .-> API[FastAPI backend]
+    API --> Synthetic[Synthetic-data model and heuristic comparison]
+    Synthetic --> Lab
+
+    classDef caveat stroke-dasharray: 5 5;
+    class Lab,API,Synthetic caveat;
