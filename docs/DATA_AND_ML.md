@@ -32,3 +32,7 @@ No external dataset has been downloaded or used in training in this pass. The mi
 Use chronological splits for temporal claims and user-held-out splits for new-user claims. Report target counts, class balance, baseline, calibration/metrics, missingness, and provenance. Synthetic evaluation only validates implementation against synthetic behavior. If action assignment is policy-generated, prediction conditioned on action is confounded by that policy; it is not a causal estimate of unchosen alternatives. Keep observed, user-reported, proxy, synthetic, and predicted records distinct in both schema and UI.
 
 Reproducible commands already documented by the repository are the backend trainer invocations in `README.md`; confirm those paths against the installed environment before treating them as a release procedure. No new model was trained in this audit.
+
+## Additional candidate named in the project brief
+
+The brief also lists a **Mobile Phone Use dataset** as a possible source for app/session-duration priors. It was not downloaded, reviewed, or used in this pass. Confirm the exact dataset/version, schema, license, participant consent, and whether app foreground intervals are available before using it. Do not join it to AmI-2018, AmI-2019, or UbiqLog identities. Any app-session duration derived from those records would be a proxy for this product, not observed notification-caused browsing or task resumption.

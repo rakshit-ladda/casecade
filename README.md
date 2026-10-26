@@ -1,6 +1,6 @@
 # AttentionTwin — Personal Attention Digital Twin
 
-> **Verified implementation status (2026-10-26):** The phone-first Android app now includes an on-device notification listener, SQLite activity history, focus timer and schedule, break digest alarms, configurable app roles, safety exceptions, offline decision rules, and labeled synthetic demo data. It can still show the first alert before the listener applies a decision; snooze timing and background reliability vary by Android/OEM. The debug build and rule-engine unit tests compile, but Xiaomi/HyperOS background behavior and Play Protect installation have not been physically verified. Offline outputs are estimates, not personal ML or validated productivity claims. See [`docs/PHONE_DEMO.md`](docs/PHONE_DEMO.md) for install and phone verification steps and [`docs/PROBLEM_STATEMENT_COMPLIANCE.md`](docs/PROBLEM_STATEMENT_COMPLIANCE.md) for remaining project requirements.
+> **Phone app status (2026-10-26):** The app has an on-device notification listener, local SQLite history, focus timer/schedule, break reminders, per-app roles, safety exceptions, and labeled sample activity. The latest source pass makes app roles default to Allow and checks focus/role before reusing any snooze marker. `npm run build` and Capacitor sync pass. The Android test/APK build could not run in this environment because Java is not installed or available; the changed APK has not been produced or installed. Real Redmi/HyperOS behavior is unverified. Android may show an alert briefly before snoozing unless DND access is enabled, and Android controls when snoozed alerts return. Local rules and sample data are estimates, not validated productivity claims. See [`docs/DEVICE_TEST_CHECKLIST.md`](docs/DEVICE_TEST_CHECKLIST.md), [`docs/DATA_AND_ML.md`](docs/DATA_AND_ML.md), and [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md).
 
 > **CASCADE 2026 — IIIT Nagpur Hackathon Project**  
 > **Phase 1: Project Foundation & Architecture Shell**  
@@ -155,9 +155,17 @@ npm run dev
 
 ## Android Native Application (Phase 7)
 
-The Capacitor Android source (`com.attentiontwin.app`) now contains a metadata-only notification listener and manual system snooze action. The APK listed below predates those source changes; it has not yet been rebuilt because JDK 21 cannot initialize its selector loopback pipe in this environment.
+The Capacitor Android source (`com.attentiontwin.app`) includes the after-post listener and Android snooze actions. Select **Block in focus** for apps you choose; app roles begin on **Allow**. The listener checks the live focus state and role before acting. The visible Pause control disables blocking and restores DND owned by AttentionTwin. The release control restores saved previews and sends a digest for held items; Android does not provide an API for pulling a snoozed notification forward.
 
-After a successful rebuild, enable Notification Access in Android Settings. The app stores bounded local metadata. It can manually snooze an active notification to the next configured break; optionally, the user can select apps and focus windows for automatic snoozing. This acts only after Android posts the notification and Android controls repost timing. On-device dashboard rules and history work without a laptop. A laptop backend is optional.
+No laptop backend is required for phone-side rules or history. DND is optional and needs Notification Policy Access. The listener acts after Android posts a notification, so an alert can flash briefly without DND. HyperOS may stop background work unless its Autostart and battery settings allow it. The latest source has not been built into a verified APK yet; see the device checklist before relying on it.
+
+### Two-minute judge demo
+
+1. Open the app, keep every suggested app on Allow, and show that setup does not silently block alerts.
+2. Choose WhatsApp (or a harmless test app) and set **Block in focus**. Start a 25-minute session.
+3. Send a test alert and show its role, decision, and reason in Live/Phone check-up. Explain that this listener acts after Android posts the alert.
+4. Use **Pause AttentionTwin** and show that focus handling is off; use **Release everything now** to see the honest Android snooze limitation.
+5. Open Insights and load the clearly labeled synthetic sample. Describe every number as a local estimate, not a personal or validated ML result.
 
 ### 1. Pre-built APK Artifact
 - **APK Path:** `frontend/android/app/build/outputs/apk/debug/app-debug.apk`
